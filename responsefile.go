@@ -14,12 +14,15 @@
 // Since arguments may themselves contain newlines,
 // newline and backslash characters are escaped with backslashes.
 //
+// Nested response files are also supported, although not all programs support
+// reading them.
+//
 // Useful links:
 // * https://gcc.gnu.org/wiki/Response_Files
 // * https://learn.microsoft.com/en-us/windows/win32/midl/response-files
 // * https://www.intel.com/content/www/us/en/docs/dpcpp-cpp-compiler/developer-guide-reference/2023-0/use-response-files.html
 //
-// TODO: support reading response files.
+// TODO: support reading nested files
 // TODO: some implementations support quoting.
 // TODO: some implementations support '#' comments.
 package responsefile
@@ -31,40 +34,41 @@ import (
 	"unicode/utf8"
 )
 
-// Config holds parameters for reading and writing response files.
-type Config struct {
+// ShortenOptions holds parameters for [Shorten].
+type ShortenOptions struct {
 	// ArgLengthLimit is the number of bytes which can be passed directly
 	// as arguments without using response files.
 	// The zero value implies the default of 30KiB,
 	// as Windows is known to have a limit of around 32KiB.
 	//
 	// A negative value can be used to always create response files.
-	//
-	// Used in [Config.WithResponseFiles].
 	ArgLengthLimit int
 }
 
-func (cfg Config) applyDefaults() Config {
-	if cfg.ArgLengthLimit == 0 {
-		cfg.ArgLengthLimit = 30 << 10 // 30KiB, since Windows can limit at 32KiB
+func (opts ShortenOptions) applyDefaults() ShortenOptions {
+	if opts.ArgLengthLimit == 0 {
+		opts.ArgLengthLimit = 30 << 10 // 30KiB, since Windows can limit at 32KiB
 	}
-	return cfg
+	return opts
 }
 
-// WithResponseFiles produces a copy of args which may use response files
-// depending on Config.
+// Shorten produces an argument list which may use response files
+// if args is too long.
 //
 // If no error is reported, a cleanup func is returned,
 // which must be called to avoid leaving temporary files behind.
-func (cfg Config) WithResponseFiles(args []string) (_ []string, cleanup func(), _ error) {
-	cfg = cfg.applyDefaults()
+//
+// The args slice may be returned directly if no response files were needed;
+// otherwise, a new slice is returned.
+func Shorten(args []string, opts ShortenOptions) (_ []string, cleanup func(), _ error) {
+	opts = opts.applyDefaults()
 
 	// TODO: does the
 	var argLen int
 	for _, arg := range args {
 		argLen += len(arg)
 	}
-	if argLen == 0 || argLen <= cfg.ArgLengthLimit {
+	if argLen == 0 || argLen <= opts.ArgLengthLimit {
 		return args, func() {}, nil
 	}
 
@@ -113,4 +117,83 @@ func appendEncodedArg(buf []byte, arg string) []byte {
 		}
 	}
 	return buf
+}
+
+// ExpandOptions holds parameters for [Expand].
+type ExpandOptions struct {
+	// Empty for now; we will likely need parameters in the future.
+	// For example, it might be nice to support io/fs.
+}
+
+// Expand produces an argument list with any response files
+// replaced with their inner arguments.
+//
+// The args slice may be returned directly if no response files were found;
+// otherwise, a new slice is returned.
+func Expand(args []string, opts ExpandOptions) ([]string, error) {
+	var expanded []string
+	for i, s := range args {
+		// TODO: use strings.CutPrefix
+		if !strings.HasPrefix(s, "@") {
+			if expanded != nil {
+				expanded = append(expanded, s)
+			}
+			continue
+		}
+		if expanded == nil {
+			expanded = make([]string, 0, len(args)*2)
+			expanded = append(expanded, args[:i]...)
+		}
+		buf, err := os.ReadFile(s[1:])
+		if err != nil {
+			return nil, fmt.Errorf("cannot read response file: %w", err)
+		}
+		// Parsing the entire file as a string is perhaps unnecessary,
+		// but it simplifies the code and may result in fewer allocs.
+		rest := string(buf)
+		for len(rest) > 0 {
+			var line string
+			line, rest, _ = strings.Cut(rest, "\n")
+			// TODO: should we trim all surrounding spaces?
+			// TODO: should we skip empty lines?
+			line = strings.TrimSuffix(line, "\r") // support CRLF
+			arg, err := decodeArg(line)
+			if err != nil {
+				return nil, err
+			}
+			expanded = append(expanded, arg)
+		}
+	}
+	// Avoid making a copy of the slice when there are no response files.
+	if expanded == nil {
+		return args, nil
+	}
+	return expanded, nil
+}
+
+func decodeArg(line string) (string, error) {
+	if !strings.Contains(line, "\\") {
+		return line, nil // shortcut
+	}
+
+	var buf strings.Builder
+	var escaping bool
+	for _, r := range line {
+		if escaping {
+			switch r {
+			case '\\':
+				buf.WriteByte('\\')
+			case 'n':
+				buf.WriteByte('\n')
+			default:
+				return "", fmt.Errorf("unsupported escape sequence: %q", "\\"+string(r))
+			}
+			escaping = false
+		} else if r == '\\' {
+			escaping = true
+		} else {
+			buf.WriteRune(r)
+		}
+	}
+	return buf.String(), nil
 }
