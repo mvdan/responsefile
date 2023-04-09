@@ -22,7 +22,6 @@
 // * https://learn.microsoft.com/en-us/windows/win32/midl/response-files
 // * https://www.intel.com/content/www/us/en/docs/dpcpp-cpp-compiler/developer-guide-reference/2023-0/use-response-files.html
 //
-// TODO: support reading nested files
 // TODO: some implementations support quoting.
 // TODO: some implementations support '#' comments.
 package responsefile
@@ -154,6 +153,7 @@ func Expand(args []string, opts ExpandOptions) ([]string, error) {
 		for len(rest) > 0 {
 			var line string
 			line, rest, _ = strings.Cut(rest, "\n")
+			// TODO: errors should include filename and ideally position.
 			// TODO: should we trim all surrounding spaces?
 			// TODO: should we skip empty lines?
 			line = strings.TrimSuffix(line, "\r") // support CRLF
@@ -161,7 +161,16 @@ func Expand(args []string, opts ExpandOptions) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
-			expanded = append(expanded, arg)
+			if strings.HasPrefix(arg, "@") {
+				// Nested response files, which should be rare.
+				nested, err := Expand([]string{arg}, opts)
+				if err != nil {
+					return nil, err
+				}
+				expanded = append(expanded, nested...)
+			} else {
+				expanded = append(expanded, arg)
+			}
 		}
 	}
 	// Avoid making a copy of the slice when there are no response files.

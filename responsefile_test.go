@@ -85,11 +85,11 @@ func TestShorten(t *testing.T) {
 			// TODO: use slices.Equal in the future
 			if !test.wantResponseFile {
 				if !reflect.DeepEqual(shortened, test.args) {
-					t.Fatalf("did not expect a response file, got %q", shortened)
+					t.Fatalf("did not expect a response file, got %#v", shortened)
 				}
 			} else {
 				if reflect.DeepEqual(shortened, test.args) {
-					t.Fatalf("expected a response file, got %q", shortened)
+					t.Fatalf("expected a response file, got %#v", shortened)
 				}
 			}
 
@@ -99,7 +99,7 @@ func TestShorten(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !reflect.DeepEqual(expanded, test.args) {
-				t.Fatalf("roundtrip got %q, expected %q", expanded, test.args)
+				t.Fatalf("roundtrip got %#v, expected %#v", expanded, test.args)
 			}
 		})
 	}
@@ -145,6 +145,15 @@ func TestExpand(t *testing.T) {
 			args:     []string{atTemp("crlf\r\n"), atTemp(""), atTemp("nolf")},
 			wantArgs: []string{"crlf", "nolf"},
 		},
+		{
+			args: []string{atTemp("l1_1\n" +
+				atTemp("l2_1\nl2_2\n") + "\n" +
+				atTemp(atTemp("l3")) + "\n" +
+				atTemp("l2_3\nl2_4\n") + "\n" +
+				"l1_2\n"),
+			},
+			wantArgs: []string{"l1_1", "l2_1", "l2_2", "l3", "l2_3", "l2_4", "l1_2"},
+		},
 	}
 
 	for _, test := range tests {
@@ -157,7 +166,7 @@ func TestExpand(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !reflect.DeepEqual(expanded, test.wantArgs) {
-				t.Fatalf("roundtrip got %q, expected %q", expanded, test.wantArgs)
+				t.Fatalf("roundtrip got %#v, expected %#v", expanded, test.wantArgs)
 			}
 		})
 	}
