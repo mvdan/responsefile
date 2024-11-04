@@ -145,6 +145,12 @@ func TestExpand(t *testing.T) {
 			wantArgs: []string{"crlf", "nolf"},
 		},
 		{
+			args: []string{atTemp("escaped\\\\\\\nchars")},
+			// TODO: newlines can be escaped, so this should be:
+			// wantArgs: []string{"escaped\\\nchars"},
+			wantArgs: []string{"escaped\\", "chars"},
+		},
+		{
 			args: []string{atTemp("l1_1\n" +
 				atTemp("l2_1\nl2_2\n") + "\n" +
 				atTemp(atTemp("l3")) + "\n" +

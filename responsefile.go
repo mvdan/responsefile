@@ -157,10 +157,7 @@ func Expand(args []string, opts ExpandOptions) ([]string, error) {
 			// TODO: should we trim all surrounding spaces?
 			// TODO: should we skip empty lines?
 			line = strings.TrimSuffix(line, "\r") // support CRLF
-			arg, err := decodeArg(line)
-			if err != nil {
-				return nil, err
-			}
+			arg := decodeArg(line)
 			if strings.HasPrefix(arg, "@") {
 				// Nested response files, which should be rare.
 				nested, err := Expand([]string{arg}, opts)
@@ -180,14 +177,16 @@ func Expand(args []string, opts ExpandOptions) ([]string, error) {
 	return expanded, nil
 }
 
-func decodeArg(line string) (string, error) {
+func decodeArg(line string) string {
 	if !strings.Contains(line, "\\") {
-		return line, nil // shortcut
+		return line // shortcut
 	}
 
 	var buf strings.Builder
 	var escaping bool
 	for _, r := range line {
+		// TODO: should escaping be turned off on Windows? that seems like it may cause many problems with filepaths,
+		// such as any path ending with a separator causing the following newline to be escaped.
 		if escaping {
 			switch r {
 			case '\\':
@@ -195,7 +194,8 @@ func decodeArg(line string) (string, error) {
 			case 'n':
 				buf.WriteByte('\n')
 			default:
-				return "", fmt.Errorf("unsupported escape sequence: %q", "\\"+string(r))
+				buf.WriteByte('\\')
+				buf.WriteRune(r)
 			}
 			escaping = false
 		} else if r == '\\' {
@@ -204,5 +204,5 @@ func decodeArg(line string) (string, error) {
 			buf.WriteRune(r)
 		}
 	}
-	return buf.String(), nil
+	return buf.String()
 }
