@@ -5,7 +5,7 @@ package responsefile_test
 
 import (
 	"os"
-	"reflect"
+	"slices"
 	"testing"
 
 	"mvdan.cc/responsefile"
@@ -82,13 +82,12 @@ func TestShorten(t *testing.T) {
 				t.Fatal("cleanup func must not be nil without an error")
 			}
 			t.Cleanup(cleanup)
-			// TODO: use slices.Equal in the future
 			if !test.wantResponseFile {
-				if !reflect.DeepEqual(shortened, test.args) {
+				if !slices.Equal(shortened, test.args) {
 					t.Fatalf("did not expect a response file, got %#v", shortened)
 				}
 			} else {
-				if reflect.DeepEqual(shortened, test.args) {
+				if slices.Equal(shortened, test.args) {
 					t.Fatalf("expected a response file, got %#v", shortened)
 				}
 			}
@@ -98,7 +97,7 @@ func TestShorten(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(expanded, test.args) {
+			if !slices.Equal(expanded, test.args) {
 				t.Fatalf("roundtrip got %#v, expected %#v", expanded, test.args)
 			}
 		})
@@ -165,8 +164,8 @@ func TestExpand(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(expanded, test.wantArgs) {
-				t.Fatalf("roundtrip got %#v, expected %#v", expanded, test.wantArgs)
+			if !slices.Equal(expanded, test.wantArgs) {
+				t.Fatalf("expand got %#v, expected %#v", expanded, test.wantArgs)
 			}
 		})
 	}

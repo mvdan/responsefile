@@ -132,8 +132,8 @@ type ExpandOptions struct {
 func Expand(args []string, opts ExpandOptions) ([]string, error) {
 	var expanded []string
 	for i, s := range args {
-		// TODO: use strings.CutPrefix
-		if !strings.HasPrefix(s, "@") {
+		path, ok := strings.CutPrefix(s, "@")
+		if !ok {
 			if expanded != nil {
 				expanded = append(expanded, s)
 			}
@@ -143,7 +143,7 @@ func Expand(args []string, opts ExpandOptions) ([]string, error) {
 			expanded = make([]string, 0, len(args)*2)
 			expanded = append(expanded, args[:i]...)
 		}
-		buf, err := os.ReadFile(s[1:])
+		buf, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("cannot read response file: %w", err)
 		}
