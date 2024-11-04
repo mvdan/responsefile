@@ -1,3 +1,3 @@
 module mvdan.cc/responsefile
 
-go 1.21
+go 1.22
