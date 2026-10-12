@@ -218,11 +218,18 @@ func TestExpand(t *testing.T) {
 		return "@" + filepath.ToSlash(f.Name())
 	}
 	lines := responsefile.ExpandOptions{Format: responsefile.FormatLines}
+	missing := "@" + filepath.ToSlash(filepath.Join(tdir, "missing"))
+	listsMissing := atTemp("bar\n" + missing)
+	cycle := filepath.ToSlash(filepath.Join(tdir, "cycle"))
+	if err := os.WriteFile(cycle, []byte("foo\n@"+cycle+"\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
 		expandOptions responsefile.ExpandOptions
 		args          []string
 		wantArgs      []string
+		wantErr       string // a substring of the error, if any
 	}{
 		{
 			args:     []string{},
@@ -302,6 +309,27 @@ func TestExpand(t *testing.T) {
 			},
 			wantArgs: []string{"l1_1", "l2_1", "l2_2", "l3", "l2_3", "l2_4", "l1_2"},
 		},
+		{
+			args:    []string{"foo", missing},
+			wantErr: "cannot read response file: ",
+		},
+		{
+			args:    []string{"foo", listsMissing},
+			wantErr: "cannot read response file listed in " + listsMissing[1:] + ": ",
+		},
+		{
+			args:    []string{"@" + cycle},
+			wantErr: "cannot expand more than 2000 response files",
+		},
+		{
+			args:    []string{"@"},
+			wantErr: "cannot read response file: ",
+		},
+		{
+			expandOptions: responsefile.ExpandOptions{Format: 99},
+			args:          []string{"foo"},
+			wantErr:       "unknown response file format",
+		},
 	}
 
 	for _, test := range tests {
@@ -309,6 +337,12 @@ func TestExpand(t *testing.T) {
 			t.Parallel()
 
 			expanded, err := responsefile.Expand(test.args, test.expandOptions)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("expected an error containing %q, got %v", test.wantErr, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -316,26 +350,5 @@ func TestExpand(t *testing.T) {
 				t.Fatalf("expand got %#v, expected %#v", expanded, test.wantArgs)
 			}
 		})
-	}
-}
-
-func TestExpandUnknownFormat(t *testing.T) {
-	t.Parallel()
-
-	if _, err := responsefile.Expand([]string{"foo"}, responsefile.ExpandOptions{Format: 99}); err == nil {
-		t.Fatal("expected an error")
-	}
-}
-
-func TestExpandCycle(t *testing.T) {
-	t.Parallel()
-
-	path := filepath.ToSlash(filepath.Join(t.TempDir(), "cycle"))
-	if err := os.WriteFile(path, []byte("foo\n@"+path+"\n"), 0o666); err != nil {
-		t.Fatal(err)
-	}
-	_, err := responsefile.Expand([]string{"@" + path}, responsefile.ExpandOptions{})
-	if err == nil {
-		t.Fatal("expected an error")
 	}
 }

@@ -77,6 +77,9 @@ func (opts ShortenOptions) applyDefaults() ShortenOptions {
 
 // Shorten produces an argument list which may use response files
 // if args is too long.
+// The args slice should not include the program name.
+// Arguments starting with '@' are written as-is,
+// so they are still expanded as response files by the program.
 //
 // If no error is reported, a cleanup func is returned,
 // which must be called to avoid leaving temporary files behind.
@@ -178,6 +181,9 @@ type ExpandOptions struct {
 
 // Expand produces an argument list with any response files
 // replaced with their inner arguments.
+// Any argument starting with '@' is a response file, and it is an error
+// if it cannot be read. Like GCC and Go, relative paths in nested response files
+// are resolved from the current directory, not the parent response file.
 //
 // The args slice may be returned directly if no response files were found;
 // otherwise, a new slice is returned.
@@ -187,14 +193,16 @@ func Expand(args []string, opts ExpandOptions) ([]string, error) {
 		return nil, err
 	}
 	var count int
-	return expand(args, parse, &count)
+	return expand(args, parse, &count, "")
 }
 
 // maxResponseFiles is how many response files a single [Expand] call may read,
 // guarding against cycles and exponential growth. GCC uses the same limit.
 const maxResponseFiles = 2000
 
-func expand(args []string, parse func([]byte) []string, count *int) ([]string, error) {
+// expand is [Expand] with a parse func, a count of the response files read
+// so far, and the path of the response file which args came from, if any.
+func expand(args []string, parse func([]byte) []string, count *int, parent string) ([]string, error) {
 	var expanded []string
 	for i, s := range args {
 		path, ok := strings.CutPrefix(s, "@")
@@ -214,9 +222,12 @@ func expand(args []string, parse func([]byte) []string, count *int) ([]string, e
 		}
 		buf, err := os.ReadFile(path)
 		if err != nil {
+			if parent != "" {
+				return nil, fmt.Errorf("cannot read response file listed in %s: %w", parent, err)
+			}
 			return nil, fmt.Errorf("cannot read response file: %w", err)
 		}
-		nested, err := expand(parse(buf), parse, count)
+		nested, err := expand(parse(buf), parse, count, path)
 		if err != nil {
 			return nil, err
 		}
