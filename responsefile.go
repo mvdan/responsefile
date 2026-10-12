@@ -130,6 +130,15 @@ type ExpandOptions struct {
 // The args slice may be returned directly if no response files were found;
 // otherwise, a new slice is returned.
 func Expand(args []string, opts ExpandOptions) ([]string, error) {
+	var count int
+	return expand(args, opts, &count)
+}
+
+// maxResponseFiles is how many response files a single [Expand] call may read,
+// guarding against cycles and exponential growth. GCC uses the same limit.
+const maxResponseFiles = 2000
+
+func expand(args []string, opts ExpandOptions, count *int) ([]string, error) {
 	var expanded []string
 	for i, s := range args {
 		path, ok := strings.CutPrefix(s, "@")
@@ -142,6 +151,10 @@ func Expand(args []string, opts ExpandOptions) ([]string, error) {
 		if expanded == nil {
 			expanded = make([]string, 0, len(args)*2)
 			expanded = append(expanded, args[:i]...)
+		}
+		*count++
+		if *count > maxResponseFiles {
+			return nil, fmt.Errorf("cannot expand more than %d response files", maxResponseFiles)
 		}
 		buf, err := os.ReadFile(path)
 		if err != nil {
@@ -160,7 +173,7 @@ func Expand(args []string, opts ExpandOptions) ([]string, error) {
 			arg := decodeArg(line)
 			if strings.HasPrefix(arg, "@") {
 				// Nested response files, which should be rare.
-				nested, err := Expand([]string{arg}, opts)
+				nested, err := expand([]string{arg}, opts, count)
 				if err != nil {
 					return nil, err
 				}

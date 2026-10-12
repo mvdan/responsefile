@@ -5,11 +5,8 @@ package responsefile_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime/debug"
 	"slices"
-	"strings"
 	"testing"
 
 	"mvdan.cc/responsefile"
@@ -182,21 +179,12 @@ func TestExpand(t *testing.T) {
 func TestExpandCycle(t *testing.T) {
 	t.Parallel()
 
-	// A response file which includes itself crashes with a stack overflow,
-	// which cannot be recovered, so expand it in a subprocess.
-	if path := os.Getenv("RESPONSEFILE_TEST_CYCLE"); path != "" {
-		debug.SetMaxStack(1 << 20)
-		responsefile.Expand([]string{"@" + path}, responsefile.ExpandOptions{})
-		return
-	}
 	path := filepath.ToSlash(filepath.Join(t.TempDir(), "cycle"))
 	if err := os.WriteFile(path, []byte("foo\n@"+path+"\n"), 0o666); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestExpandCycle$")
-	cmd.Env = append(os.Environ(), "RESPONSEFILE_TEST_CYCLE="+path)
-	out, err := cmd.CombinedOutput()
-	if err == nil || !strings.Contains(string(out), "stack overflow") {
-		t.Fatalf("expected a stack overflow, got %v:\n%s", err, out)
+	_, err := responsefile.Expand([]string{"@" + path}, responsefile.ExpandOptions{})
+	if err == nil {
+		t.Fatal("expected an error")
 	}
 }
