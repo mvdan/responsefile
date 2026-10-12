@@ -62,8 +62,8 @@ func TestShorten(t *testing.T) {
 		{
 			shortenOptions: always,
 			args:           []string{"a\xff\\b", "c\xff\nd"},
-			// Bug: invalid UTF-8 is replaced with U+FFFD.
-			wantFile: "a\uFFFD\\\\b\nc\uFFFD\\nd\n",
+			// Invalid UTF-8 is kept as-is.
+			wantFile: "a\xff\\\\b\nc\xff\\nd\n",
 		},
 	}
 
@@ -114,6 +114,7 @@ func FuzzRoundtrip(f *testing.F) {
 	f.Add("")
 	f.Add("foo\x00bar\x00baz")
 	f.Add("back\\slash\x00new\nline\x00")
+	f.Add("a\xff\\b\x00c\xff\nd")
 	f.Fuzz(func(t *testing.T, joined string) {
 		args := strings.Split(joined, "\x00")
 		if slices.ContainsFunc(args, func(arg string) bool { return strings.HasPrefix(arg, "@") }) {
@@ -176,18 +177,18 @@ func TestExpand(t *testing.T) {
 		},
 		{
 			args: []string{atTemp("escaped\\\\\\\nchars")},
-			// Bug: a trailing lone backslash is dropped.
-			wantArgs: []string{"escaped\\", "chars"},
+			// A trailing lone backslash is kept.
+			wantArgs: []string{"escaped\\\\", "chars"},
 		},
 		{
 			args: []string{atTemp(`C:\dir\`)},
-			// Bug: a trailing lone backslash is dropped.
-			wantArgs: []string{`C:\dir`},
+			// A trailing lone backslash is kept.
+			wantArgs: []string{`C:\dir\`},
 		},
 		{
 			args: []string{atTemp("a\xff\\\\b")},
-			// Bug: invalid UTF-8 is replaced with U+FFFD.
-			wantArgs: []string{"a\uFFFD\\b"},
+			// Invalid UTF-8 is kept as-is.
+			wantArgs: []string{"a\xff\\b"},
 		},
 		{
 			args: []string{atTemp("l1_1\n" +

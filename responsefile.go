@@ -30,7 +30,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"unicode/utf8"
 )
 
 // ShortenOptions holds parameters for [Shorten].
@@ -72,10 +71,11 @@ func Shorten(args []string, opts ShortenOptions) (_ []string, cleanup func(), _ 
 	}
 
 	// We will need space for at least each argument plus a newline.
-	buf := make([]byte, 0, argLen+len(args))
+	var buf strings.Builder
+	buf.Grow(argLen + len(args))
 	for _, arg := range args {
-		buf = appendEncodedArg(buf, arg)
-		buf = append(buf, '\n')
+		escaper.WriteString(&buf, arg)
+		buf.WriteByte('\n')
 	}
 
 	f, err := os.CreateTemp("", "responsefile")
@@ -86,7 +86,7 @@ func Shorten(args []string, opts ShortenOptions) (_ []string, cleanup func(), _ 
 	// cannot remove it, there's not much that can be done about it.
 	cleanup = func() { os.Remove(f.Name()) }
 
-	if _, err := f.Write(buf); err != nil {
+	if _, err := f.WriteString(buf.String()); err != nil {
 		f.Close()
 		cleanup()
 		return nil, nil, fmt.Errorf("cannot write response file: %w", err)
@@ -99,24 +99,12 @@ func Shorten(args []string, opts ShortenOptions) (_ []string, cleanup func(), _ 
 	return args, cleanup, nil
 }
 
-// appendEncodedArg appends arg to buf while escaping backslashes and
-// newlines.
-func appendEncodedArg(buf []byte, arg string) []byte {
-	if !strings.ContainsAny(arg, "\\\n") {
-		return append(buf, arg...) // shortcut
-	}
-	for _, r := range arg {
-		switch r {
-		case '\\':
-			buf = append(buf, '\\', '\\')
-		case '\n':
-			buf = append(buf, '\\', 'n')
-		default:
-			buf = utf8.AppendRune(buf, r)
-		}
-	}
-	return buf
-}
+// escaper and unescaper escape backslashes and newlines in arguments,
+// so that each argument fits in a line.
+var (
+	escaper   = strings.NewReplacer(`\`, `\\`, "\n", `\n`)
+	unescaper = strings.NewReplacer(`\\`, `\`, `\n`, "\n")
+)
 
 // ExpandOptions holds parameters for [Expand].
 type ExpandOptions struct {
@@ -191,31 +179,10 @@ func expand(args []string, opts ExpandOptions, count *int) ([]string, error) {
 }
 
 func decodeArg(line string) string {
-	if !strings.Contains(line, "\\") {
+	// TODO: should escaping be turned off on Windows? that seems like it may cause many problems with filepaths,
+	// such as any path ending with a separator causing the following newline to be escaped.
+	if !strings.Contains(line, `\`) {
 		return line // shortcut
 	}
-
-	var buf strings.Builder
-	var escaping bool
-	for _, r := range line {
-		// TODO: should escaping be turned off on Windows? that seems like it may cause many problems with filepaths,
-		// such as any path ending with a separator causing the following newline to be escaped.
-		if escaping {
-			switch r {
-			case '\\':
-				buf.WriteByte('\\')
-			case 'n':
-				buf.WriteByte('\n')
-			default:
-				buf.WriteByte('\\')
-				buf.WriteRune(r)
-			}
-			escaping = false
-		} else if r == '\\' {
-			escaping = true
-		} else {
-			buf.WriteRune(r)
-		}
-	}
-	return buf.String()
+	return unescaper.Replace(line)
 }
