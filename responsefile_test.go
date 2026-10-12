@@ -26,6 +26,7 @@ func TestShorten(t *testing.T) {
 
 		// wantFile is the content of the response file, or empty if none is used.
 		wantFile string
+		wantErr  bool
 	}{
 		{
 			args: []string{},
@@ -94,6 +95,17 @@ func TestShorten(t *testing.T) {
 			// Invalid UTF-8 is kept as-is.
 			wantFile: "a\xff\\\\b\nc\xff\\nd\n",
 		},
+		{
+			shortenOptions: alwaysLines,
+			args:           []string{"cr\r"},
+			// Bug: Expand drops the carriage return as part of a CRLF line ending.
+			wantFile: "cr\r\n",
+		},
+		{
+			shortenOptions: responsefile.ShortenOptions{Format: 99},
+			args:           []string{"foo"},
+			wantErr:        true,
+		},
 	}
 
 	for _, test := range tests {
@@ -105,7 +117,13 @@ func TestShorten(t *testing.T) {
 				if cleanup != nil {
 					t.Fatal("cleanup func must be nil on error")
 				}
-				t.Fatal(err)
+				if !test.wantErr {
+					t.Fatal(err)
+				}
+				return
+			}
+			if test.wantErr {
+				t.Fatalf("expected an error, got %q", shortened)
 			}
 			if cleanup == nil {
 				t.Fatal("cleanup func must not be nil without an error")
@@ -298,14 +316,11 @@ func TestExpand(t *testing.T) {
 	}
 }
 
-func TestUnknownFormat(t *testing.T) {
+func TestExpandUnknownFormat(t *testing.T) {
 	t.Parallel()
 
-	if _, _, err := responsefile.Shorten([]string{"foo"}, responsefile.ShortenOptions{Format: 99}); err == nil {
-		t.Fatal("Shorten: expected an error")
-	}
 	if _, err := responsefile.Expand([]string{"foo"}, responsefile.ExpandOptions{Format: 99}); err == nil {
-		t.Fatal("Expand: expected an error")
+		t.Fatal("expected an error")
 	}
 }
 
