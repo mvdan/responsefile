@@ -4,9 +4,12 @@
 package responsefile_test
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"mvdan.cc/responsefile"
@@ -14,56 +17,53 @@ import (
 
 func TestShorten(t *testing.T) {
 	t.Parallel()
+	always := responsefile.ShortenOptions{ArgLengthLimit: -1}
+
 	tests := []struct {
 		shortenOptions responsefile.ShortenOptions
 		args           []string
 
-		wantResponseFile bool
+		// wantFile is the content of the response file, or empty if none is used.
+		wantFile string
 	}{
 		{
-			shortenOptions:   responsefile.ShortenOptions{},
-			args:             []string{},
-			wantResponseFile: false,
+			args: []string{},
 		},
 		{
-			shortenOptions:   responsefile.ShortenOptions{},
-			args:             []string{"foo", "bar", "baz"},
-			wantResponseFile: false,
+			args: []string{"foo", "bar", "baz"},
 		},
 		{
-			shortenOptions: responsefile.ShortenOptions{
-				ArgLengthLimit: 20,
-			},
-			args:             []string{"foo", "bar", "baz"},
-			wantResponseFile: false,
+			shortenOptions: responsefile.ShortenOptions{ArgLengthLimit: 20},
+			args:           []string{"foo", "bar", "baz"},
 		},
 		{
-			shortenOptions: responsefile.ShortenOptions{
-				ArgLengthLimit: 2,
-			},
-			args:             []string{"foo", "bar", "baz"},
-			wantResponseFile: true,
+			shortenOptions: responsefile.ShortenOptions{ArgLengthLimit: 2},
+			args:           []string{"foo", "bar", "baz"},
+			wantFile:       "foo\nbar\nbaz\n",
 		},
 		{
-			shortenOptions: responsefile.ShortenOptions{
-				ArgLengthLimit: -1,
-			},
-			args:             []string{},
-			wantResponseFile: false,
+			shortenOptions: always,
+			args:           []string{},
 		},
 		{
-			shortenOptions: responsefile.ShortenOptions{
-				ArgLengthLimit: -1,
-			},
-			args:             []string{""},
-			wantResponseFile: false,
+			shortenOptions: always,
+			args:           []string{""},
 		},
 		{
-			shortenOptions: responsefile.ShortenOptions{
-				ArgLengthLimit: -1,
-			},
-			args:             []string{"foo", "bar", "baz"},
-			wantResponseFile: true,
+			shortenOptions: always,
+			args:           []string{"foo", "bar", "baz"},
+			wantFile:       "foo\nbar\nbaz\n",
+		},
+		{
+			shortenOptions: always,
+			args:           []string{"back\\slash", "new\nline", ""},
+			wantFile:       "back\\\\slash\nnew\\nline\n\n",
+		},
+		{
+			shortenOptions: always,
+			args:           []string{"a\xff\\b", "c\xff\nd"},
+			// Bug: invalid UTF-8 is replaced with U+FFFD.
+			wantFile: "a\uFFFD\\\\b\nc\uFFFD\\nd\n",
 		},
 	}
 
@@ -82,26 +82,56 @@ func TestShorten(t *testing.T) {
 				t.Fatal("cleanup func must not be nil without an error")
 			}
 			t.Cleanup(cleanup)
-			if !test.wantResponseFile {
+			if test.wantFile == "" {
 				if !slices.Equal(shortened, test.args) {
-					t.Fatalf("did not expect a response file, got %#v", shortened)
+					t.Fatalf("did not expect a response file, got %q", shortened)
 				}
-			} else {
-				if slices.Equal(shortened, test.args) {
-					t.Fatalf("expected a response file, got %#v", shortened)
-				}
+				return
 			}
-
-			// Ensure that we can roundtrip back to the original args too.
-			expanded, err := responsefile.Expand(shortened, responsefile.ExpandOptions{})
+			if len(shortened) != 1 || !strings.HasPrefix(shortened[0], "@") {
+				t.Fatalf("expected a single response file argument, got %q", shortened)
+			}
+			path := shortened[0][1:]
+			got, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !slices.Equal(expanded, test.args) {
-				t.Fatalf("roundtrip got %#v, expected %#v", expanded, test.args)
+			if string(got) != test.wantFile {
+				t.Fatalf("response file got %q, want %q", got, test.wantFile)
+			}
+			cleanup()
+			if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("cleanup did not remove the response file: %v", err)
 			}
 		})
 	}
+}
+
+// FuzzRoundtrip checks that [responsefile.Expand] undoes [responsefile.Shorten].
+// The input holds the arguments separated by NUL bytes,
+// which cannot appear in program arguments.
+func FuzzRoundtrip(f *testing.F) {
+	f.Add("")
+	f.Add("foo\x00bar\x00baz")
+	f.Add("back\\slash\x00new\nline\x00")
+	f.Fuzz(func(t *testing.T, joined string) {
+		args := strings.Split(joined, "\x00")
+		if slices.ContainsFunc(args, func(arg string) bool { return strings.HasPrefix(arg, "@") }) {
+			t.Skip("arguments starting with @ are response files")
+		}
+		shortened, cleanup, err := responsefile.Shorten(args, responsefile.ShortenOptions{ArgLengthLimit: -1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		expanded, err := responsefile.Expand(shortened, responsefile.ExpandOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(expanded, args) {
+			t.Fatalf("roundtrip got %q, want %q", expanded, args)
+		}
+	})
 }
 
 func TestExpand(t *testing.T) {
@@ -146,9 +176,18 @@ func TestExpand(t *testing.T) {
 		},
 		{
 			args: []string{atTemp("escaped\\\\\\\nchars")},
-			// TODO: newlines can be escaped, so this should be:
-			// wantArgs: []string{"escaped\\\nchars"},
+			// Bug: a trailing lone backslash is dropped.
 			wantArgs: []string{"escaped\\", "chars"},
+		},
+		{
+			args: []string{atTemp(`C:\dir\`)},
+			// Bug: a trailing lone backslash is dropped.
+			wantArgs: []string{`C:\dir`},
+		},
+		{
+			args: []string{atTemp("a\xff\\\\b")},
+			// Bug: invalid UTF-8 is replaced with U+FFFD.
+			wantArgs: []string{"a\uFFFD\\b"},
 		},
 		{
 			args: []string{atTemp("l1_1\n" +
