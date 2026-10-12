@@ -48,15 +48,18 @@ func TestShorten(t *testing.T) {
 		{
 			shortenOptions: always,
 			args:           []string{""},
-			// Bug: a negative limit does not use a response file.
+			// A negative limit always uses a response file.
+			wantFile: "\n",
 		},
 		{
 			args: slices.Repeat([]string{"a.o"}, 10<<10),
-			// Bug: separators are not counted towards the limit.
+			// Separators count towards the limit.
+			wantFile: strings.Repeat("a.o\n", 10<<10),
 		},
 		{
 			args: slices.Repeat([]string{"-DNAME=a long value"}, 1400),
-			// Bug: quoting is not counted towards the limit.
+			// Quoting counts towards the limit.
+			wantFile: strings.Repeat("-DNAME=a long value\n", 1400),
 		},
 		{
 			shortenOptions: always,

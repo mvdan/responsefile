@@ -36,10 +36,12 @@ import (
 type ShortenOptions struct {
 	// ArgLengthLimit is the number of bytes which can be passed directly
 	// as arguments without using response files.
+	// Separators and any quoting needed on Windows count towards the limit.
 	// The zero value implies the default of 30KiB,
 	// as Windows is known to have a limit of around 32KiB.
 	//
-	// A negative value can be used to always create response files.
+	// A negative value can be used to always create response files,
+	// unless there are no arguments.
 	ArgLengthLimit int
 }
 
@@ -61,18 +63,17 @@ func (opts ShortenOptions) applyDefaults() ShortenOptions {
 func Shorten(args []string, opts ShortenOptions) (_ []string, cleanup func(), _ error) {
 	opts = opts.applyDefaults()
 
-	// TODO: does the
 	var argLen int
 	for _, arg := range args {
-		argLen += len(arg)
+		argLen += cmdLineLen(arg)
 	}
-	if argLen == 0 || argLen <= opts.ArgLengthLimit {
+	if len(args) == 0 || argLen <= opts.ArgLengthLimit {
 		return args, func() {}, nil
 	}
 
 	// We will need space for at least each argument plus a newline.
 	var buf strings.Builder
-	buf.Grow(argLen + len(args))
+	buf.Grow(argLen)
 	for _, arg := range args {
 		escaper.WriteString(&buf, arg)
 		buf.WriteByte('\n')
@@ -97,6 +98,18 @@ func Shorten(args []string, opts ShortenOptions) (_ []string, cleanup func(), _ 
 	}
 	args = []string{"@" + f.Name()}
 	return args, cleanup, nil
+}
+
+// cmdLineLen returns an upper bound for the number of bytes that arg takes
+// on a command line, including a separator.
+// On Windows, arguments with spaces or tabs are quoted,
+// and backslashes and quotes may need to be escaped.
+func cmdLineLen(arg string) int {
+	n := len(arg) + 1
+	if arg == "" || strings.ContainsAny(arg, " \t") {
+		n += 2
+	}
+	return n + strings.Count(arg, `\`) + strings.Count(arg, `"`)
 }
 
 // escaper and unescaper escape backslashes and newlines in arguments,
