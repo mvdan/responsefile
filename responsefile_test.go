@@ -98,8 +98,8 @@ func TestShorten(t *testing.T) {
 		{
 			shortenOptions: alwaysLines,
 			args:           []string{"cr\r"},
-			// Bug: Expand drops the carriage return as part of a CRLF line ending.
-			wantFile: "cr\r\n",
+			// Expand would drop the carriage return as part of a CRLF line ending.
+			wantErr: true,
 		},
 		{
 			shortenOptions: responsefile.ShortenOptions{Format: 99},
@@ -173,6 +173,9 @@ func FuzzRoundtrip(f *testing.F) {
 		args := strings.Split(joined, "\x00")
 		if slices.ContainsFunc(args, func(arg string) bool { return strings.HasPrefix(arg, "@") }) {
 			t.Skip("arguments starting with @ are response files")
+		}
+		if format == int(responsefile.FormatLines) && slices.ContainsFunc(args, func(arg string) bool { return strings.HasSuffix(arg, "\r") }) {
+			t.Skip("FormatLines cannot write arguments ending with a carriage return")
 		}
 		shortened, cleanup, err := responsefile.Shorten(args, responsefile.ShortenOptions{
 			Format:         responsefile.Format(format),

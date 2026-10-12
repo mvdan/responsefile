@@ -36,12 +36,13 @@ const (
 
 	// FormatLines puts each argument on its own line,
 	// escaping backslashes as `\\` and newlines as `\n`.
+	// Arguments cannot end with a carriage return, as CRLF line endings are supported.
 	// It is understood by Go 1.26 or earlier.
 	FormatLines
 )
 
 // funcs returns the functions which write and read response files in f.
-func (f Format) funcs() (writeArg func(*strings.Builder, string), parse func([]byte) []string, _ error) {
+func (f Format) funcs() (writeArg func(*strings.Builder, string) error, parse func([]byte) []string, _ error) {
 	switch f {
 	case FormatGCC:
 		return writeGCCArg, parseGCC, nil
@@ -101,7 +102,9 @@ func Shorten(args []string, opts ShortenOptions) (_ []string, cleanup func(), _ 
 	var buf strings.Builder
 	buf.Grow(argLen)
 	for _, arg := range args {
-		writeArg(&buf, arg)
+		if err := writeArg(&buf, arg); err != nil {
+			return nil, nil, err
+		}
 		buf.WriteByte('\n')
 	}
 
@@ -146,20 +149,25 @@ var (
 
 // writeGCCArg writes arg to buf in [FormatGCC],
 // using double quotes and escaping when needed.
-func writeGCCArg(buf *strings.Builder, arg string) {
+func writeGCCArg(buf *strings.Builder, arg string) error {
 	if arg != "" && !strings.ContainsAny(arg, gccSpace+`'"\`) {
 		buf.WriteString(arg) // shortcut
-		return
+		return nil
 	}
 	buf.WriteByte('"')
 	gccEscaper.WriteString(buf, arg)
 	buf.WriteByte('"')
+	return nil
 }
 
 // writeLinesArg writes arg to buf in [FormatLines],
 // escaping backslashes and newlines.
-func writeLinesArg(buf *strings.Builder, arg string) {
+func writeLinesArg(buf *strings.Builder, arg string) error {
+	if strings.HasSuffix(arg, "\r") {
+		return fmt.Errorf("cannot write argument ending with a carriage return: %q", arg)
+	}
 	linesEscaper.WriteString(buf, arg)
+	return nil
 }
 
 // ExpandOptions holds parameters for [Expand].
