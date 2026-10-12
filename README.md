@@ -3,11 +3,11 @@
 [![Go Reference](https://pkg.go.dev/badge/mvdan.cc/responsefile.svg)](https://pkg.go.dev/mvdan.cc/responsefile)
 
 A tiny library to support response files,
-newline-separated plaintext files which hold lists of arguments.
+plaintext files which hold lists of arguments.
 
 Response files are commonly used on systems with low argument length limits,
 such as Windows.
 
-Supported by [GCC](https://gcc.gnu.org/wiki/Response_Files),
-[Windows](https://learn.microsoft.com/en-us/windows/win32/midl/response-files),
-the Go toolchain, and many others.
+The default format follows [GCC](https://gcc.gnu.org/wiki/Response_Files),
+which is also understood by Clang and [Go 1.27 or later](https://go.dev/issue/77177).
+The newline-separated format used by Go 1.26 or earlier is also supported.

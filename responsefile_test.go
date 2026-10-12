@@ -18,6 +18,7 @@ import (
 func TestShorten(t *testing.T) {
 	t.Parallel()
 	always := responsefile.ShortenOptions{ArgLengthLimit: -1}
+	alwaysLines := responsefile.ShortenOptions{Format: responsefile.FormatLines, ArgLengthLimit: -1}
 
 	tests := []struct {
 		shortenOptions responsefile.ShortenOptions
@@ -49,7 +50,7 @@ func TestShorten(t *testing.T) {
 			shortenOptions: always,
 			args:           []string{""},
 			// A negative limit always uses a response file.
-			wantFile: "\n",
+			wantFile: "\"\"\n",
 		},
 		{
 			args: slices.Repeat([]string{"a.o"}, 10<<10),
@@ -59,7 +60,7 @@ func TestShorten(t *testing.T) {
 		{
 			args: slices.Repeat([]string{"-DNAME=a long value"}, 1400),
 			// Quoting counts towards the limit.
-			wantFile: strings.Repeat("-DNAME=a long value\n", 1400),
+			wantFile: strings.Repeat("\"-DNAME=a long value\"\n", 1400),
 		},
 		{
 			shortenOptions: always,
@@ -69,10 +70,26 @@ func TestShorten(t *testing.T) {
 		{
 			shortenOptions: always,
 			args:           []string{"back\\slash", "new\nline", ""},
-			wantFile:       "back\\\\slash\nnew\\nline\n\n",
+			wantFile:       "\"back\\\\slash\"\n\"new\nline\"\n\"\"\n",
 		},
 		{
 			shortenOptions: always,
+			args:           []string{"it's", `say "hi"`, "tab\there", "cr\r"},
+			wantFile:       "\"it's\"\n\"say \\\"hi\\\"\"\n\"tab\there\"\n\"cr\r\"\n",
+		},
+		{
+			shortenOptions: always,
+			args:           []string{"a\xff\\b", "c\xff\nd"},
+			// Invalid UTF-8 is kept as-is.
+			wantFile: "\"a\xff\\\\b\"\n\"c\xff\nd\"\n",
+		},
+		{
+			shortenOptions: alwaysLines,
+			args:           []string{"back\\slash", "new\nline", ""},
+			wantFile:       "back\\\\slash\nnew\\nline\n\n",
+		},
+		{
+			shortenOptions: alwaysLines,
 			args:           []string{"a\xff\\b", "c\xff\nd"},
 			// Invalid UTF-8 is kept as-is.
 			wantFile: "a\xff\\\\b\nc\xff\\nd\n",
@@ -123,21 +140,33 @@ func TestShorten(t *testing.T) {
 // The input holds the arguments separated by NUL bytes,
 // which cannot appear in program arguments.
 func FuzzRoundtrip(f *testing.F) {
-	f.Add("")
-	f.Add("foo\x00bar\x00baz")
-	f.Add("back\\slash\x00new\nline\x00")
-	f.Add("a\xff\\b\x00c\xff\nd")
-	f.Fuzz(func(t *testing.T, joined string) {
+	formats := []responsefile.Format{responsefile.FormatGCC, responsefile.FormatLines}
+	for _, format := range formats {
+		f.Add("", int(format))
+		f.Add("foo\x00bar\x00baz", int(format))
+		f.Add("back\\slash\x00new\nline\x00", int(format))
+		f.Add("a\xff\\b\x00c\xff\nd", int(format))
+	}
+	f.Add("it's\x00say \"hi\"\x00tab\there\x00cr\r", int(responsefile.FormatGCC))
+	f.Fuzz(func(t *testing.T, joined string, format int) {
+		if !slices.Contains(formats, responsefile.Format(format)) {
+			t.Skip("unknown format")
+		}
 		args := strings.Split(joined, "\x00")
 		if slices.ContainsFunc(args, func(arg string) bool { return strings.HasPrefix(arg, "@") }) {
 			t.Skip("arguments starting with @ are response files")
 		}
-		shortened, cleanup, err := responsefile.Shorten(args, responsefile.ShortenOptions{ArgLengthLimit: -1})
+		shortened, cleanup, err := responsefile.Shorten(args, responsefile.ShortenOptions{
+			Format:         responsefile.Format(format),
+			ArgLengthLimit: -1,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer cleanup()
-		expanded, err := responsefile.Expand(shortened, responsefile.ExpandOptions{})
+		expanded, err := responsefile.Expand(shortened, responsefile.ExpandOptions{
+			Format: responsefile.Format(format),
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -164,12 +193,15 @@ func TestExpand(t *testing.T) {
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
-		return "@" + f.Name()
+		// Use forward slashes, as backslashes are escapes in response files.
+		return "@" + filepath.ToSlash(f.Name())
 	}
+	lines := responsefile.ExpandOptions{Format: responsefile.FormatLines}
 
 	tests := []struct {
-		args     []string
-		wantArgs []string
+		expandOptions responsefile.ExpandOptions
+		args          []string
+		wantArgs      []string
 	}{
 		{
 			args:     []string{},
@@ -188,17 +220,55 @@ func TestExpand(t *testing.T) {
 			wantArgs: []string{"crlf", "nolf"},
 		},
 		{
-			args: []string{atTemp("escaped\\\\\\\nchars")},
+			args:     []string{atTemp("  foo\tbar\n\nbaz  qux \r\n")},
+			wantArgs: []string{"foo", "bar", "baz", "qux"},
+		},
+		{
+			args:     []string{atTemp(`'single \"quoted\"' "double \"quoted\" \$x \y" un\ quoted`)},
+			wantArgs: []string{`single \"quoted\"`, `double "quoted" $x \y`, "un quoted"},
+		},
+		{
+			args:     []string{atTemp(`"" '' a""b`)},
+			wantArgs: []string{"", "", "ab"},
+		},
+		{
+			args:     []string{atTemp("con\\\ntinued \"con\\\r\ntinued\" \\\n \"multi\nline\" trailing\\")},
+			wantArgs: []string{"continued", "continued", "multi\nline", "trailing"},
+		},
+		{
+			args:     []string{atTemp("foo \\")},
+			wantArgs: []string{"foo"},
+		},
+		{
+			args: []string{atTemp(`C:\dir "C:\dir\\"`)},
+			// Backslashes escape the next character unless double-quoted.
+			wantArgs: []string{"C:dir", `C:\dir\`},
+		},
+		{
+			args: []string{atTemp("\"a\xff\\\\b\"")},
+			// Invalid UTF-8 is kept as-is.
+			wantArgs: []string{"a\xff\\b"},
+		},
+		{
+			expandOptions: lines,
+			args:          []string{atTemp("foo bar\n'baz'\n\n")},
+			wantArgs:      []string{"foo bar", "'baz'", ""},
+		},
+		{
+			expandOptions: lines,
+			args:          []string{atTemp("escaped\\\\\\\nchars")},
 			// A trailing lone backslash is kept.
 			wantArgs: []string{"escaped\\\\", "chars"},
 		},
 		{
-			args: []string{atTemp(`C:\dir\`)},
+			expandOptions: lines,
+			args:          []string{atTemp(`C:\dir\`)},
 			// A trailing lone backslash is kept.
 			wantArgs: []string{`C:\dir\`},
 		},
 		{
-			args: []string{atTemp("a\xff\\\\b")},
+			expandOptions: lines,
+			args:          []string{atTemp("a\xff\\\\b")},
 			// Invalid UTF-8 is kept as-is.
 			wantArgs: []string{"a\xff\\b"},
 		},
@@ -217,7 +287,7 @@ func TestExpand(t *testing.T) {
 		t.Run("", func(t *testing.T) {
 			t.Parallel()
 
-			expanded, err := responsefile.Expand(test.args, responsefile.ExpandOptions{})
+			expanded, err := responsefile.Expand(test.args, test.expandOptions)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -225,6 +295,17 @@ func TestExpand(t *testing.T) {
 				t.Fatalf("expand got %#v, expected %#v", expanded, test.wantArgs)
 			}
 		})
+	}
+}
+
+func TestUnknownFormat(t *testing.T) {
+	t.Parallel()
+
+	if _, _, err := responsefile.Shorten([]string{"foo"}, responsefile.ShortenOptions{Format: 99}); err == nil {
+		t.Fatal("Shorten: expected an error")
+	}
+	if _, err := responsefile.Expand([]string{"foo"}, responsefile.ExpandOptions{Format: 99}); err == nil {
+		t.Fatal("Expand: expected an error")
 	}
 }
 

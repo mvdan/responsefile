@@ -2,38 +2,60 @@
 // See LICENSE for licensing information
 
 // Package responsefile provides support for response files,
-// newline-separated plaintext files which hold lists of arguments.
+// plaintext files which hold lists of arguments.
 //
 // Response files are commonly used on systems with low argument length limits,
-// such as Windows. They are supported by programs like GCC, Go's compiler
-// and linker, Windows toolchains, and the ninja build system.
+// such as Windows. An argument starting with '@' followed by a file path
+// is replaced by the arguments held in that response file,
+// which may themselves include nested response files.
 //
-// Response files have no formal specification or grammar,
-// but they are commonly identified by an argument starting with '@'
-// followed by a path to a file containing newline-separated arguments.
-// Since arguments may themselves contain newlines,
-// newline and backslash characters are escaped with backslashes.
-//
-// Nested response files are also supported, although not all programs support
-// reading them.
+// Response files have no formal specification, and their syntax varies
+// between programs; see [Format] for the supported syntaxes.
 //
 // Useful links:
-// * https://gcc.gnu.org/wiki/Response_Files
-// * https://learn.microsoft.com/en-us/windows/win32/midl/response-files
-// * https://www.intel.com/content/www/us/en/docs/dpcpp-cpp-compiler/developer-guide-reference/2023-0/use-response-files.html
-//
-// TODO: some implementations support quoting.
-// TODO: some implementations support '#' comments.
+//   - https://gcc.gnu.org/wiki/Response_Files
+//   - https://go.dev/issue/77177
 package responsefile
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"strings"
 )
 
+// Format is a syntax for response files.
+type Format int
+
+const (
+	// FormatGCC separates arguments by whitespace,
+	// and supports quoting with single and double quotes as well as
+	// escaping with backslashes, following GCC's libiberty.
+	// It is understood by GCC, Clang, and Go 1.27 or later.
+	FormatGCC Format = iota
+
+	// FormatLines puts each argument on its own line,
+	// escaping backslashes as `\\` and newlines as `\n`.
+	// It is understood by Go 1.26 or earlier.
+	FormatLines
+)
+
+// funcs returns the functions which write and read response files in f.
+func (f Format) funcs() (writeArg func(*strings.Builder, string), parse func([]byte) []string, _ error) {
+	switch f {
+	case FormatGCC:
+		return writeGCCArg, parseGCC, nil
+	case FormatLines:
+		return writeLinesArg, parseLines, nil
+	}
+	return nil, nil, fmt.Errorf("unknown response file format: %d", f)
+}
+
 // ShortenOptions holds parameters for [Shorten].
 type ShortenOptions struct {
+	// Format is the syntax used to write response files.
+	Format Format
+
 	// ArgLengthLimit is the number of bytes which can be passed directly
 	// as arguments without using response files.
 	// Separators and any quoting needed on Windows count towards the limit.
@@ -62,6 +84,10 @@ func (opts ShortenOptions) applyDefaults() ShortenOptions {
 // otherwise, a new slice is returned.
 func Shorten(args []string, opts ShortenOptions) (_ []string, cleanup func(), _ error) {
 	opts = opts.applyDefaults()
+	writeArg, _, err := opts.Format.funcs()
+	if err != nil {
+		return nil, nil, err
+	}
 
 	var argLen int
 	for _, arg := range args {
@@ -75,7 +101,7 @@ func Shorten(args []string, opts ShortenOptions) (_ []string, cleanup func(), _ 
 	var buf strings.Builder
 	buf.Grow(argLen)
 	for _, arg := range args {
-		escaper.WriteString(&buf, arg)
+		writeArg(&buf, arg)
 		buf.WriteByte('\n')
 	}
 
@@ -112,17 +138,34 @@ func cmdLineLen(arg string) int {
 	return n + strings.Count(arg, `\`) + strings.Count(arg, `"`)
 }
 
-// escaper and unescaper escape backslashes and newlines in arguments,
-// so that each argument fits in a line.
 var (
-	escaper   = strings.NewReplacer(`\`, `\\`, "\n", `\n`)
-	unescaper = strings.NewReplacer(`\\`, `\`, `\n`, "\n")
+	gccEscaper     = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	linesEscaper   = strings.NewReplacer(`\`, `\\`, "\n", `\n`)
+	linesUnescaper = strings.NewReplacer(`\\`, `\`, `\n`, "\n")
 )
+
+// writeGCCArg writes arg to buf in [FormatGCC],
+// using double quotes and escaping when needed.
+func writeGCCArg(buf *strings.Builder, arg string) {
+	if arg != "" && !strings.ContainsAny(arg, gccSpace+`'"\`) {
+		buf.WriteString(arg) // shortcut
+		return
+	}
+	buf.WriteByte('"')
+	gccEscaper.WriteString(buf, arg)
+	buf.WriteByte('"')
+}
+
+// writeLinesArg writes arg to buf in [FormatLines],
+// escaping backslashes and newlines.
+func writeLinesArg(buf *strings.Builder, arg string) {
+	linesEscaper.WriteString(buf, arg)
+}
 
 // ExpandOptions holds parameters for [Expand].
 type ExpandOptions struct {
-	// Empty for now; we will likely need parameters in the future.
-	// For example, it might be nice to support io/fs.
+	// Format is the syntax used to read response files.
+	Format Format
 }
 
 // Expand produces an argument list with any response files
@@ -131,15 +174,19 @@ type ExpandOptions struct {
 // The args slice may be returned directly if no response files were found;
 // otherwise, a new slice is returned.
 func Expand(args []string, opts ExpandOptions) ([]string, error) {
+	_, parse, err := opts.Format.funcs()
+	if err != nil {
+		return nil, err
+	}
 	var count int
-	return expand(args, opts, &count)
+	return expand(args, parse, &count)
 }
 
 // maxResponseFiles is how many response files a single [Expand] call may read,
 // guarding against cycles and exponential growth. GCC uses the same limit.
 const maxResponseFiles = 2000
 
-func expand(args []string, opts ExpandOptions, count *int) ([]string, error) {
+func expand(args []string, parse func([]byte) []string, count *int) ([]string, error) {
 	var expanded []string
 	for i, s := range args {
 		path, ok := strings.CutPrefix(s, "@")
@@ -161,28 +208,11 @@ func expand(args []string, opts ExpandOptions, count *int) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("cannot read response file: %w", err)
 		}
-		// Parsing the entire file as a string is perhaps unnecessary,
-		// but it simplifies the code and may result in fewer allocs.
-		rest := string(buf)
-		for len(rest) > 0 {
-			var line string
-			line, rest, _ = strings.Cut(rest, "\n")
-			// TODO: errors should include filename and ideally position.
-			// TODO: should we trim all surrounding spaces?
-			// TODO: should we skip empty lines?
-			line = strings.TrimSuffix(line, "\r") // support CRLF
-			arg := decodeArg(line)
-			if strings.HasPrefix(arg, "@") {
-				// Nested response files, which should be rare.
-				nested, err := expand([]string{arg}, opts, count)
-				if err != nil {
-					return nil, err
-				}
-				expanded = append(expanded, nested...)
-			} else {
-				expanded = append(expanded, arg)
-			}
+		nested, err := expand(parse(buf), parse, count)
+		if err != nil {
+			return nil, err
 		}
+		expanded = append(expanded, nested...)
 	}
 	// Avoid making a copy of the slice when there are no response files.
 	if expanded == nil {
@@ -191,11 +221,83 @@ func expand(args []string, opts ExpandOptions, count *int) ([]string, error) {
 	return expanded, nil
 }
 
-func decodeArg(line string) string {
-	// TODO: should escaping be turned off on Windows? that seems like it may cause many problems with filepaths,
-	// such as any path ending with a separator causing the following newline to be escaped.
-	if !strings.Contains(line, `\`) {
-		return line // shortcut
+// gccSpace holds the bytes which separate arguments in [FormatGCC].
+const gccSpace = " \t\n\v\f\r"
+
+// parseGCC splits a response file in [FormatGCC] into arguments,
+// following buildargv in GCC's libiberty.
+// Like Go, a backslash followed by CRLF is also a line continuation,
+// and neither a line continuation alone nor a trailing backslash
+// produces an empty argument, unlike GCC.
+func parseGCC(s []byte) []string {
+	var args []string
+	var arg []byte
+	started := false // whether an argument has started, even if empty
+	var squote, dquote bool
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		switch {
+		case squote:
+			if b == '\'' {
+				squote = false
+			} else {
+				arg = append(arg, b)
+			}
+		case b == '\\':
+			next := s[i+1:]
+			switch {
+			case bytes.HasPrefix(next, []byte("\n")):
+				i++ // line continuation
+			case bytes.HasPrefix(next, []byte("\r\n")):
+				i += 2 // line continuation
+			case len(next) == 0:
+				// A trailing backslash is dropped.
+			case dquote && strings.IndexByte("$`\"\\", next[0]) < 0:
+				arg = append(arg, b) // a backslash escaping nothing is kept
+			default:
+				arg = append(arg, next[0])
+				started = true
+				i++
+			}
+		case dquote:
+			if b == '"' {
+				dquote = false
+			} else {
+				arg = append(arg, b)
+			}
+		case strings.IndexByte(gccSpace, b) >= 0:
+			if started {
+				args = append(args, string(arg))
+				arg = arg[:0]
+				started = false
+			}
+		case b == '\'':
+			squote, started = true, true
+		case b == '"':
+			dquote, started = true, true
+		default:
+			arg = append(arg, b)
+			started = true
+		}
 	}
-	return unescaper.Replace(line)
+	if started {
+		args = append(args, string(arg))
+	}
+	return args
+}
+
+// parseLines splits a response file in [FormatLines] into arguments.
+func parseLines(b []byte) []string {
+	var args []string
+	s := string(b)
+	for len(s) > 0 {
+		var line string
+		line, s, _ = strings.Cut(s, "\n")
+		line = strings.TrimSuffix(line, "\r") // support CRLF
+		if strings.Contains(line, `\`) {
+			line = linesUnescaper.Replace(line)
+		}
+		args = append(args, line)
+	}
+	return args
 }
